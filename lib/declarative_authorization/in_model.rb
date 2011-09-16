@@ -179,6 +179,40 @@ module Authorization
           end
         end
 
+        # Activates attributes security for the current model.  Then, Create/Update operations
+        # are checked against the authorization of the current user.  The
+        # privileges are :+create+, :+update+ in the
+        # context of the model.  
+        #   class User < ActiveRecord::Base
+        #     using_attr_control
+        #   end
+        #
+        # If an operation is not permitted, a Authorization::AttributeAuthorizationError
+        # is raised.
+        #
+        # To activate attributes security on all models, call using_access_control
+        # on ActiveRecord::Base
+        #   ActiveRecord::Base.using_access_control
+        #
+        # Available options
+        # [:+context+] Specify context different from the models table name.
+        
+
+        def self.using_attr_control (options = {})
+          options = {
+            :context => nil
+          }.merge(options)
+
+          class_eval do
+            [:create, :update, [:destroy, :delete]].each do |action, privilege|
+              send(:"before_#{action}") do |object|
+                Authorization::Engine.instance.permit_attr!(privilege || action,
+                  :object => object, :context => options[:context])
+              end
+            end
+          end
+        end
+
         # Returns true if the model is using model security.
         def self.using_access_control?
           false

@@ -262,7 +262,8 @@ module Authorization
 
         file, line = file_and_line_number_from_call_stack
         rule = AuthorizationRule.new(@current_role, privs, context, options[:join_by],
-                   :source_file => file, :source_line => line)
+                   :source_file => file, :source_line => line, :read_only_attr => options[:read_only_attr],
+                   :create_only_attr => options[:create_only_attr], :update_only_attr => options[:update_only_attr])
         @auth_rules << rule
         if block_given?
           @current_rule = rule

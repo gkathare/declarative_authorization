@@ -190,6 +190,114 @@ module Authorization
         false
       end
     end
+
+    def permit_attr! (privilege, options = {})
+      return true if Authorization.ignore_access_control
+      options = {
+        :object => nil,
+        :skip_attribute_test => false,
+        :context => nil,
+        :bang => true
+      }.merge(options)
+
+      # Make sure we're handling all privileges as symbols.
+      privilege = privilege.is_a?( Array ) ?
+                  privilege.flatten.collect { |priv| priv.to_sym } :
+                  privilege.to_sym
+
+      #
+      # If the object responds to :proxy_reflection, we're probably working with
+      # an association proxy.  Use 'new' to leverage ActiveRecord's builder
+      # functionality to obtain an object against which we can check permissions.
+      #
+      # Example: permit_attr!( :edit, :object => user.posts )
+      #
+      if options[:object].respond_to?( :proxy_reflection ) && options[:object].respond_to?( :new )
+        options[:object] = options[:object].new
+      end
+
+      options[:context] ||= options[:object] && (
+        options[:object].class.respond_to?(:decl_auth_context) ?
+            options[:object].class.decl_auth_context :
+            options[:object].class.name.tableize.to_sym
+      ) rescue NoMethodError
+
+
+      user, roles, privileges = user_roles_privleges_from_options(privilege, options)
+
+      return true if roles.is_a?(Array) and not (roles & @omnipotent_roles).empty?
+      
+      # To check changed attributes of the object is permitted to changes or not.
+      return true if validate_attr?(roles, privilege, options[:object], options[:context])
+
+      if options[:bang]
+        raise AttributeAuthorizationError, "#{privilege} not allowed for #{user.inspect} on #{(options[:object] || options[:context]).inspect}."
+      else
+        false
+      end
+    end
+
+    # it will return all rules of user on the basis of given context and roles.
+    def get_user_auth_rules(roles, context)
+      all_valid_rules = []
+      roles.each do |role|
+        all_valid_rules |= @auth_rules.select {|c| c.contexts.include?(context) && c.role == role}
+      end
+      return all_valid_rules
+    end
+
+    # To check weather changed attributes of the object is restricted or not.
+    # returns true or generate exceptions
+    def validate_attr?(roles, privilege, object, context)
+      all_read_only_attr, all_update_only_attr, all_create_only_attr = [], [], []
+
+      user_auth_rules = get_user_auth_rules(roles, context)
+
+      unless user_auth_rules.empty?
+        user_auth_rules.each do |rule|
+         all_read_only_attr |= rule.read_only_attr
+         all_update_only_attr |= rule.update_only_attr
+         all_create_only_attr |= rule.create_only_attr
+        end
+      end
+
+      changed_attributes = object.changed # get changed attributes
+      invalid_fields = []
+
+      # check for create and update privilege on read only fields
+      if !all_read_only_attr.empty? && (privilege == :create || privilege == :update)
+        all_read_only_attr.each do |read_attr|
+          if changed_attributes.include?(read_attr.to_s) || !eval("object.instance_variable_get :@#{read_attr.to_s}").blank?
+            invalid_fields << read_attr.to_s
+          end
+        end
+      end
+
+      # check for create privilege on update only fields
+      if !all_update_only_attr.empty? && (privilege == :create)
+        all_update_only_attr.each do |update_attr|
+          if changed_attributes.include?(update_attr.to_s) || !eval("object.instance_variable_get :@#{update_attr.to_s}").blank?
+            invalid_fields << update_attr.to_s
+          end
+        end
+      end
+
+      # check for update privilege on create only fields
+      if !all_create_only_attr.empty? && (privilege == :update)
+        all_create_only_attr.each do |create_attr|
+          if changed_attributes.include?(create_attr.to_s) || !eval("object.instance_variable_get :@#{create_attr.to_s}").blank?
+            invalid_fields << create_attr.to_s
+          end
+        end
+      end
+
+      invalid_fields = invalid_fields.compact.uniq
+      
+      unless invalid_fields.empty?
+        raise AttributeAuthorizationError, "You are not authorized to #{privilege} #{object.class.name}'s field(s): " + invalid_fields.join(", ")
+      end
+      return true
+    end
     
     # Calls permit! but doesn't raise authorization errors. If no exception is
     # raised, permit? returns true and yields  to the optional block.
@@ -386,7 +494,7 @@ module Authorization
   end
   class AuthorizationRule
     attr_reader :attributes, :contexts, :role, :privileges, :join_operator,
-        :source_file, :source_line
+        :source_file, :source_line, :read_only_attr, :create_only_attr, :update_only_attr
     
     def initialize (role, privileges = [], contexts = nil, join_operator = :or,
           options = {})
@@ -397,6 +505,23 @@ module Authorization
       @attributes = []
       @source_file = options[:source_file]
       @source_line = options[:source_line]
+      if options[:read_only_attr]
+        @read_only_attr = options[:read_only_attr].is_a?(Array)? options[:read_only_attr] : [options[:read_only_attr]]
+      else
+        @read_only_attr = []
+      end
+
+      if options[:create_only_attr]
+        @create_only_attr = options[:create_only_attr].is_a?(Array)? options[:create_only_attr] : [options[:create_only_attr]]
+      else
+        @create_only_attr = []
+      end
+
+      if options[:update_only_attr]
+        @update_only_attr = options[:update_only_attr].is_a?(Array)? options[:update_only_attr] : [options[:update_only_attr]]
+      else
+        @update_only_attr = []
+      end
     end
 
     def initialize_copy (from)
